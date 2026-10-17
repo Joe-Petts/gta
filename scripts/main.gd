@@ -28,6 +28,8 @@ var status_label: Label
 var health_tiles: HBoxContainer
 var last_hit := -10.0
 var game_time := 0.0
+var wanted := 0
+var police: Array[Dictionary] = []
 var car_invulnerability := 0.0
 
 
@@ -85,6 +87,54 @@ func _setup_people_and_vehicles() -> void:
         var row := int(i / 6) - 2
         var origin := Vector2(float(col) * BLOCK + 102.0, float(row) * BLOCK + 120.0)
         pedestrians.append({"pos": origin, "origin": origin, "phase": float(i) * 1.7, "axis": i % 2})
+
+
+func _overlaps(a: Vector2, ar: float, ak: int, b: Vector2, br: float, bk: int, margin: float = 2.0) -> bool:
+    var ah: Vector2 = VEHICLE_SIZES[ak] * 0.5 + Vector2.ONE * margin
+    var bh: Vector2 = VEHICLE_SIZES[bk] * 0.5 + Vector2.ONE * margin
+    var ax := Vector2.RIGHT.rotated(ar)
+    var ay := Vector2.DOWN.rotated(ar)
+    var bx := Vector2.RIGHT.rotated(br)
+    var by := Vector2.DOWN.rotated(br)
+    for axis in [ax, ay, bx, by]:
+        var ra := ah.x * absf(axis.dot(ax)) + ah.y * absf(axis.dot(ay))
+        var rb := bh.x * absf(axis.dot(bx)) + bh.y * absf(axis.dot(by))
+        if absf((b - a).dot(axis)) >= ra + rb:
+            return false
+    return true
+
+func _angle_for(dir: Vector2) -> float:
+    return dir.angle() + PI * 0.5
+
+func _clear_vehicle(p: Vector2, rot: float, kind: int, skip: int = -1, include_player: bool = true) -> bool:
+    var half: Vector2 = VEHICLE_SIZES[kind] * 0.5
+    for x in [-1.0, 1.0]:
+        for y in [-1.0, 1.0]:
+            if _static_blocked(p + Vector2(x * half.x, y * half.y).rotated(rot), 1.0):
+                return false
+    if include_player and _overlaps(p, rot, kind, car, angle, vehicle_kind):
+        return false
+    for i in range(traffic.size()):
+        if i != skip and _overlaps(p, rot, kind, traffic[i]["pos"], _angle_for(traffic[i]["dir"]), int(traffic[i]["kind"])):
+            return false
+    for other in parked:
+        if _overlaps(p, rot, kind, other["pos"], 0.0, int(other["kind"])):
+            return false
+    return true
+
+func _police_update(delta: float) -> void:
+    if wanted == 0:
+        return
+    for cop in police:
+        var pos: Vector2 = cop["pos"]
+        var delta_pos := player - pos
+        if delta_pos.length() > 20.0:
+            var candidate := pos + delta_pos.normalized() * 125.0 * delta
+            if not _static_blocked(candidate, 24.0):
+                cop["pos"] = candidate
+        if cop["pos"].distance_to(player) < 48.0 and game_time - last_hit > 1.5:
+            health = maxf(0.0, health - 10.0)
+            last_hit = game_time
 
 func _vehicle_radius(kind: int) -> float:
     var size: Vector2 = VEHICLE_SIZES[kind]
@@ -164,73 +214,57 @@ func _move_safely(pos: Vector2, motion: Vector2, radius: float) -> Vector2:
             result.y += step.y
     return result
 
+
 func _traffic_tick(delta: float) -> void:
     light_time = fmod(light_time + delta, 14.0)
-    var previous: Array[Vector2] = []
+    var old: Array[Vector2] = []
     for item in traffic:
-        previous.append(item["pos"])
-    var planned: Array[Vector2] = []
+        old.append(item["pos"])
+    var next_positions: Array[Vector2] = []
     for i in range(traffic.size()):
         var item: Dictionary = traffic[i]
-        var pos: Vector2 = previous[i]
-        var direction: Vector2 = item["dir"]
-        var radius := _vehicle_radius(int(item["kind"]))
-        var distance_to_stop := 75.0 + radius
-        var axis := pos.x if abs(direction.x) > 0.5 else pos.y
-        var sign_axis := direction.x if abs(direction.x) > 0.5 else direction.y
-        var red := light_time >= 7.0 if abs(direction.x) > 0.5 else light_time < 7.0
-        var movement := direction * 100.0 * delta
-        var blocked := false
+        var pos: Vector2 = old[i]
+        var dir: Vector2 = item["dir"]
+        var kind := int(item["kind"])
+        var rot := _angle_for(dir)
+        var next := pos + dir * 100.0 * delta
+        var red := light_time >= 7.0 if absf(dir.x) > 0.5 else light_time < 7.0
+        var axis := pos.x if absf(dir.x) > 0.5 else pos.y
+        var heading := dir.x if absf(dir.x) > 0.5 else dir.y
+        var stop := false
         if red:
             for n in range(-3, 4):
-                var dist := (float(n) * BLOCK - axis) * sign_axis
-                if dist >= distance_to_stop and dist < distance_to_stop + movement.length() + 2.0:
-                    blocked = true
-                    break
-        var next := pos + movement
-        if next.distance_to(car) < radius + _vehicle_radius(vehicle_kind) + 12.0:
-            blocked = true
+                var d := (float(n) * BLOCK - axis) * heading
+                var threshold := 75.0 + VEHICLE_SIZES[kind].y * 0.5
+                if d >= threshold and d < threshold + 100.0 * delta + 2.0:
+                    stop = true
+        if _overlaps(next, rot, kind, car, angle, vehicle_kind, 4.0):
+            stop = true
         for other in parked:
-            if next.distance_to(other["pos"]) < radius + _vehicle_radius(int(other["kind"])) + 8.0:
-                blocked = true
-                break
+            if _overlaps(next, rot, kind, other["pos"], 0.0, int(other["kind"]), 4.0):
+                stop = true
         for j in range(traffic.size()):
-            if i == j:
-                continue
-            var other_pos: Vector2 = previous[j]
-            var other_kind := int(traffic[j]["kind"])
-            var clearance := radius + _vehicle_radius(other_kind) + 10.0
-            # Both old and intended positions matter at crossings.
-            if next.distance_to(other_pos) < clearance or next.distance_to(other_pos + traffic[j]["dir"] * 100.0 * delta) < clearance:
-                blocked = true
-                break
-        for other_pos in planned:
-            if next.distance_to(other_pos) < radius + 85.0:
-                blocked = true
-                break
-        if blocked:
-            next = pos
-        var wrapped := next
-        if next.x > 1390.0:
+            if j != i and _overlaps(next, rot, kind, old[j], _angle_for(traffic[j]["dir"]), int(traffic[j]["kind"]), 4.0):
+                stop = true
+        for j in range(next_positions.size()):
+            if _overlaps(next, rot, kind, next_positions[j], _angle_for(traffic[j]["dir"]), int(traffic[j]["kind"]), 4.0):
+                stop = true
+        if not stop and not _static_blocked(next, 15.0):
+            pos = next
+        var wrapped := pos
+        if pos.x > 1370.0:
             wrapped.x = -1370.0
-        elif next.x < -1390.0:
+        elif pos.x < -1370.0:
             wrapped.x = 1370.0
-        if next.y > 1390.0:
+        if pos.y > 1370.0:
             wrapped.y = -1370.0
-        elif next.y < -1390.0:
+        elif pos.y < -1370.0:
             wrapped.y = 1370.0
-        if wrapped != next:
-            var can_wrap := wrapped.distance_to(car) > radius + _vehicle_radius(vehicle_kind)
-            for j in range(traffic.size()):
-                if i != j and wrapped.distance_to(previous[j]) < radius + _vehicle_radius(int(traffic[j]["kind"])) + 10.0:
-                    can_wrap = false
-            if can_wrap:
-                next = wrapped
-            else:
-                next = pos
-        planned.append(next)
+        if wrapped != pos and _clear_vehicle(wrapped, rot, kind, i):
+            pos = wrapped
+        next_positions.append(pos)
     for i in range(traffic.size()):
-        traffic[i]["pos"] = planned[i]
+        traffic[i]["pos"] = next_positions[i]
 
 func _ready() -> void:
     camera = Camera2D.new()
@@ -276,6 +310,7 @@ func _process(delta: float) -> void:
     car_invulnerability = maxf(0.0, car_invulnerability - delta)
     _traffic_tick(delta)
     _update_pedestrians(delta)
+    _police_update(delta)
     var move := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
     if driving:
         speed = move_toward(speed, -move.y * 380.0, 350.0 * delta)
@@ -289,7 +324,7 @@ func _process(delta: float) -> void:
         var step := motion / float(steps)
         for i in range(steps):
             var candidate := next + step
-            if not _static_blocked(candidate, _vehicle_radius(vehicle_kind)) and _vehicle_clear(candidate, vehicle_kind):
+            if _clear_vehicle(candidate, angle, vehicle_kind, -1, false):
                 next = candidate
             else:
                 break
@@ -300,6 +335,13 @@ func _process(delta: float) -> void:
             speed = 0.0
         car = next
         player = car
+        if absf(speed) > 45.0:
+            for i in range(pedestrians.size() - 1, -1, -1):
+                if car.distance_to(pedestrians[i]["pos"]) < _vehicle_radius(vehicle_kind):
+                    pedestrians.remove_at(i)
+                    wanted = 1
+                    if police.is_empty():
+                        police.append({"pos": player + Vector2(0, -300)})
     else:
         player = _move_safely(player, move * 230.0 * delta, 11.0)
     if Input.is_key_pressed(KEY_E) and not _e_held:
@@ -312,7 +354,7 @@ func _process(delta: float) -> void:
         else:
             # Find the closest car, including moving traffic; the original car
             # must not take priority just because it is already selected.
-            var nearest := 105.0
+            var nearest := 170.0
             var source := ""
             var index := -1
             var d := player.distance_to(car)
@@ -327,7 +369,7 @@ func _process(delta: float) -> void:
                     index = i
             for i in range(traffic.size()):
                 d = player.distance_to(traffic[i]["pos"])
-                if d < nearest:
+                if d < nearest and d < _vehicle_radius(int(traffic[i]["kind"])) + 75.0:
                     nearest = d
                     source = "traffic"
                     index = i
@@ -371,6 +413,8 @@ func _process(delta: float) -> void:
     for i in range(health_tiles.get_child_count()):
         var tile: ColorRect = health_tiles.get_child(i)
         tile.color = Color("43c978") if health > float(i) * 10.0 else Color("d95454")
+    if wanted > 0:
+        status_label.text += "  |  WANTED: POLICE"
     queue_redraw()
 
 func _building(p: Vector2, size: Vector2, roof: Color, windows: bool = true) -> void:
@@ -477,6 +521,9 @@ func _draw() -> void:
         var dir: Vector2 = vehicle["dir"]
         _draw_vehicle(p, dir.angle() + PI / 2.0, int(vehicle["kind"]), 1.0)
     draw_set_transform(Vector2.ZERO, 0.0)
+    for cop in police:
+        _draw_vehicle(cop["pos"], 0.0, 0, 1.0)
+        draw_circle(cop["pos"], 6.0, Color("245bd5"))
     for item in parked:
         _draw_vehicle(item["pos"], 0.0, item["kind"], 1.0)
     for person in pedestrians:
