@@ -235,7 +235,7 @@ func _traffic_tick(delta: float) -> void:
         if red:
             for n in range(-3, 4):
                 var d := (float(n) * BLOCK - axis) * heading
-                var threshold := 75.0 + VEHICLE_SIZES[kind].y * 0.5
+                var threshold: float = 75.0 + (VEHICLE_SIZES[kind] as Vector2).y * 0.5
                 if d >= threshold and d < threshold + 100.0 * delta + 2.0:
                     stop = true
         if _overlaps(next, rot, kind, car, angle, vehicle_kind, 4.0):
