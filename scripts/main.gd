@@ -63,9 +63,9 @@ func _setup_world() -> void:
     # Drop conflicting initial positions rather than spawning overlapping cars.
     var clean: Array[Dictionary] = []
     for item in traffic:
-        var clear := item["pos"].distance_to(car) > 110.0
+        var clear := item["pos"].distance_to(car) > _vehicle_radius(int(item["kind"])) + _vehicle_radius(vehicle_kind) + 12.0
         for other in clean:
-            if item["pos"].distance_to(other["pos"]) < 115.0:
+            if item["pos"].distance_to(other["pos"]) < _vehicle_radius(int(item["kind"])) + _vehicle_radius(int(other["kind"])) + 12.0:
                 clear = false
                 break
         if clear:
