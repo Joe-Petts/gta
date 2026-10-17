@@ -12,6 +12,24 @@ jobs:
       image: barichello/godot-ci:4.3
     steps:
       - uses: actions/checkout@v4
+      - name: Install Godot export templates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/share/godot/export_templates/4.3.stable"
+          python3 - <<'PY'
+          import urllib.request, zipfile, io, os, shutil
+          url = "https://github.com/godotengine/godot-builds/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz"
+          dest = os.path.expanduser("~/.local/share/godot/export_templates/4.3.stable")
+          with urllib.request.urlopen(url, timeout=180) as response:
+              data = response.read()
+          with zipfile.ZipFile(io.BytesIO(data)) as archive:
+              for name in archive.namelist():
+                  if name in ("templates/windows_release_x86_64.exe", "templates/windows_debug_x86_64.exe"):
+                      with archive.open(name) as src, open(os.path.join(dest, os.path.basename(name)), "wb") as out:
+                          shutil.copyfileobj(src, out)
+          assert os.path.isfile(os.path.join(dest, "windows_release_x86_64.exe"))
+          PY
       - name: Import project resources
         run: godot --headless --editor --path . --quit
       - name: Export Windows executable
