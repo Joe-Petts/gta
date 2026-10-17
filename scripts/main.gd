@@ -51,12 +51,25 @@ func _setup_world() -> void:
                 blockers.append(Rect2(p + Vector2(14, 14), Vector2(125, 260)))
                 blockers.append(Rect2(p + Vector2(155, 14), Vector2(120, 123)))
                 blockers.append(Rect2(p + Vector2(155, 152), Vector2(120, 122)))
+    # Spawn traffic in separated lanes and away from intersections.
     for n in range(-2, 3):
         var road := float(n) * BLOCK
-        traffic.append({"kind": (n + 3) % 6, "pos": Vector2(-1000.0 + n * 120.0, road + 30), "dir": Vector2.RIGHT})
-        traffic.append({"pos": Vector2(1000.0 - n * 120.0, road - 30), "dir": Vector2.LEFT})
-        traffic.append({"pos": Vector2(road - 30, -900.0 + n * 130.0), "dir": Vector2.DOWN})
-        traffic.append({"pos": Vector2(road + 30, 900.0 - n * 130.0), "dir": Vector2.UP})
+        var offset := float(n + 2) * 440.0
+        traffic.append({"kind": (n + 3) % 6, "pos": Vector2(-1100.0 + offset, road + 30.0), "dir": Vector2.RIGHT})
+        traffic.append({"kind": (n + 4) % 6, "pos": Vector2(1100.0 - offset, road - 30.0), "dir": Vector2.LEFT})
+        traffic.append({"kind": (n + 5) % 6, "pos": Vector2(road - 30.0, -1150.0 + offset), "dir": Vector2.DOWN})
+        traffic.append({"kind": (n + 2) % 6, "pos": Vector2(road + 30.0, 1150.0 - offset), "dir": Vector2.UP})
+    # Drop conflicting initial positions rather than spawning overlapping cars.
+    var clean: Array[Dictionary] = []
+    for item in traffic:
+        var clear := item["pos"].distance_to(car) > 110.0
+        for other in clean:
+            if item["pos"].distance_to(other["pos"]) < 115.0:
+                clear = false
+                break
+        if clear:
+            clean.append(item)
+    traffic = clean
 
 func _setup_people_and_vehicles() -> void:
     # Parked vehicles stay off the active lanes and intersections.
@@ -407,9 +420,7 @@ func _draw() -> void:
     for vehicle in traffic:
         var p: Vector2 = vehicle["pos"]
         var dir: Vector2 = vehicle["dir"]
-        draw_set_transform(p, dir.angle() + PI / 2.0)
-        draw_rect(Rect2(-19, -32, 38, 64), Color("b96455"))
-        draw_rect(Rect2(-15, -16, 30, 20), Color("354e64"))
+        _draw_vehicle(p, dir.angle() + PI / 2.0, int(vehicle["kind"]), 1.0)
     draw_set_transform(Vector2.ZERO, 0.0)
     for item in parked:
         _draw_vehicle(item["pos"], 0.0, item["kind"], 1.0)
