@@ -28,6 +28,7 @@ var status_label: Label
 var health_tiles: HBoxContainer
 var last_hit := -10.0
 var game_time := 0.0
+var car_invulnerability := 0.0
 
 
 func _setup_world() -> void:
@@ -72,16 +73,46 @@ func _setup_world() -> void:
     traffic = clean
 
 func _setup_people_and_vehicles() -> void:
-    # Parked vehicles stay off the active lanes and intersections.
     parked.clear()
+    # Park cars along quieter streets, not in the center of a junction.
     for i in range(5):
-        var lane := float(i - 2) * BLOCK
-        parked.append({"pos": Vector2(lane + 111.0, -1320.0), "kind": i + 1, "health": 100.0})
+        var x := float(i - 2) * BLOCK + 130.0
+        var p := Vector2(x, -1320.0)
+        if not _static_blocked(p, 42.0) and p.distance_to(car) > 135.0:
+            parked.append({"pos": p, "kind": i + 1, "health": 100.0})
     for i in range(24):
         var col := i % 6 - 3
         var row := int(i / 6) - 2
         var origin := Vector2(float(col) * BLOCK + 102.0, float(row) * BLOCK + 120.0)
         pedestrians.append({"pos": origin, "origin": origin, "phase": float(i) * 1.7, "axis": i % 2})
+
+func _vehicle_radius(kind: int) -> float:
+    var size: Vector2 = VEHICLE_SIZES[kind]
+    return sqrt(size.x * size.x + size.y * size.y) * 0.5 + 7.0
+
+func _static_blocked(pos: Vector2, radius: float) -> bool:
+    if abs(pos.x) + radius > WORLD * 0.5 or abs(pos.y) + radius > WORLD * 0.5:
+        return true
+    for rect in blockers:
+        var nearest := Vector2(clampf(pos.x, rect.position.x, rect.end.x), clampf(pos.y, rect.position.y, rect.end.y))
+        if nearest.distance_squared_to(pos) < radius * radius:
+            return true
+    return false
+
+func _vehicle_clear(pos: Vector2, kind: int, ignore_traffic: int = -1) -> bool:
+    var radius := _vehicle_radius(kind)
+    if _static_blocked(pos, radius):
+        return false
+    for i in range(traffic.size()):
+        if i == ignore_traffic:
+            continue
+        var other: Dictionary = traffic[i]
+        if pos.distance_to(other["pos"]) < radius + _vehicle_radius(int(other["kind"])):
+            return false
+    for other in parked:
+        if pos.distance_to(other["pos"]) < radius + _vehicle_radius(int(other["kind"])):
+            return false
+    return true
 
 func _make_bar(ui: CanvasLayer, at: Vector2, tint: Color) -> ProgressBar:
     var bar := ProgressBar.new()
@@ -111,20 +142,14 @@ func _update_pedestrians(delta: float) -> void:
             person["pos"] = next
 
 func _blocked(pos: Vector2, radius: float, check_traffic: bool = true) -> bool:
-    if abs(pos.x) + radius > WORLD / 2.0 or abs(pos.y) + radius > WORLD / 2.0:
+    if _static_blocked(pos, radius):
         return true
-    for rect in blockers:
-        var q := Vector2(clampf(pos.x, rect.position.x, rect.end.x), clampf(pos.y, rect.position.y, rect.end.y))
-        if q.distance_squared_to(pos) < radius * radius:
-            return true
     if check_traffic:
         for item in parked:
-            var parked_pos: Vector2 = item["pos"]
-            if parked_pos.distance_squared_to(pos) < (radius + 29.0) * (radius + 29.0):
+            if pos.distance_to(item["pos"]) < radius + _vehicle_radius(int(item["kind"])):
                 return true
-        for vehicle in traffic:
-            var p: Vector2 = vehicle["pos"]
-            if p.distance_squared_to(pos) < (radius + 23.0) * (radius + 23.0):
+        for item in traffic:
+            if pos.distance_to(item["pos"]) < radius + _vehicle_radius(int(item["kind"])):
                 return true
     return false
 
@@ -141,61 +166,71 @@ func _move_safely(pos: Vector2, motion: Vector2, radius: float) -> Vector2:
 
 func _traffic_tick(delta: float) -> void:
     light_time = fmod(light_time + delta, 14.0)
-    # Snapshot positions so updates cannot let one car drive through another.
-    var old_positions: Array[Vector2] = []
+    var previous: Array[Vector2] = []
     for item in traffic:
-        old_positions.append(item["pos"])
+        previous.append(item["pos"])
+    var planned: Array[Vector2] = []
     for i in range(traffic.size()):
-        var vehicle: Dictionary = traffic[i]
-        var pos: Vector2 = old_positions[i]
-        var dir: Vector2 = vehicle["dir"]
-        var axis := pos.x if abs(dir.x) > 0.5 else pos.y
-        var heading := dir.x if abs(dir.x) > 0.5 else dir.y
-        var red := light_time >= 7.0 if abs(dir.x) > 0.5 else light_time < 7.0
-        var stop := false
+        var item: Dictionary = traffic[i]
+        var pos: Vector2 = previous[i]
+        var direction: Vector2 = item["dir"]
+        var radius := _vehicle_radius(int(item["kind"]))
+        var distance_to_stop := 75.0 + radius
+        var axis := pos.x if abs(direction.x) > 0.5 else pos.y
+        var sign_axis := direction.x if abs(direction.x) > 0.5 else direction.y
+        var red := light_time >= 7.0 if abs(direction.x) > 0.5 else light_time < 7.0
+        var movement := direction * 100.0 * delta
+        var blocked := false
         if red:
             for n in range(-3, 4):
-                var distance := (float(n) * BLOCK - axis) * heading
-                if distance >= 76.0 and distance < 79.0 + 100.0 * delta:
-                    stop = true
-        var next := pos + dir * 100.0 * delta
-        if next.distance_to(car) < 74.0:
-            stop = true
+                var dist := (float(n) * BLOCK - axis) * sign_axis
+                if dist >= distance_to_stop and dist < distance_to_stop + movement.length() + 2.0:
+                    blocked = true
+                    break
+        var next := pos + movement
+        if next.distance_to(car) < radius + _vehicle_radius(vehicle_kind) + 12.0:
+            blocked = true
+        for other in parked:
+            if next.distance_to(other["pos"]) < radius + _vehicle_radius(int(other["kind"])) + 8.0:
+                blocked = true
+                break
         for j in range(traffic.size()):
             if i == j:
                 continue
-            var other: Vector2 = old_positions[j]
-            # A vehicle in the lane ahead, or one crossing our path.
-            var forward := (other - pos).dot(dir)
-            var lateral := absf((other - pos).cross(dir))
-            if forward > -12.0 and forward < 98.0 and lateral < 49.0:
-                stop = true
+            var other_pos: Vector2 = previous[j]
+            var other_kind := int(traffic[j]["kind"])
+            var clearance := radius + _vehicle_radius(other_kind) + 10.0
+            # Both old and intended positions matter at crossings.
+            if next.distance_to(other_pos) < clearance or next.distance_to(other_pos + traffic[j]["dir"] * 100.0 * delta) < clearance:
+                blocked = true
                 break
-            if next.distance_to(other) < 56.0:
-                stop = true
+        for other_pos in planned:
+            if next.distance_to(other_pos) < radius + 85.0:
+                blocked = true
                 break
-        if not stop:
-            pos = next
-        # Re-entry is only allowed if the destination is clear.
-        var wrapped := pos
-        if pos.x > 1390.0:
-            wrapped.x = -1390.0
-        elif pos.x < -1390.0:
-            wrapped.x = 1390.0
-        if pos.y > 1390.0:
-            wrapped.y = -1390.0
-        elif pos.y < -1390.0:
-            wrapped.y = 1390.0
-        if wrapped != pos:
-            var free := wrapped.distance_to(car) > 95.0
+        if blocked:
+            next = pos
+        var wrapped := next
+        if next.x > 1390.0:
+            wrapped.x = -1370.0
+        elif next.x < -1390.0:
+            wrapped.x = 1370.0
+        if next.y > 1390.0:
+            wrapped.y = -1370.0
+        elif next.y < -1390.0:
+            wrapped.y = 1370.0
+        if wrapped != next:
+            var can_wrap := wrapped.distance_to(car) > radius + _vehicle_radius(vehicle_kind)
             for j in range(traffic.size()):
-                if i != j and wrapped.distance_to(old_positions[j]) < 110.0:
-                    free = false
-            if free:
-                pos = wrapped
+                if i != j and wrapped.distance_to(previous[j]) < radius + _vehicle_radius(int(traffic[j]["kind"])) + 10.0:
+                    can_wrap = false
+            if can_wrap:
+                next = wrapped
             else:
-                pos = old_positions[i]
-        vehicle["pos"] = pos
+                next = pos
+        planned.append(next)
+    for i in range(traffic.size()):
+        traffic[i]["pos"] = planned[i]
 
 func _ready() -> void:
     camera = Camera2D.new()
@@ -238,6 +273,7 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
     game_time += delta
+    car_invulnerability = maxf(0.0, car_invulnerability - delta)
     _traffic_tick(delta)
     _update_pedestrians(delta)
     var move := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
@@ -248,10 +284,19 @@ func _process(delta: float) -> void:
         if abs(speed) > 5.0:
             angle += move.x * 2.3 * delta * sign(speed)
         var motion := Vector2.UP.rotated(angle) * speed * delta
-        var next := _move_safely(car, motion, VEHICLE_SIZES[vehicle_kind].x * 0.52)
-        if next.distance_to(car + motion) > 2.0:
-            if abs(speed) > 65.0:
-                vehicle_health = maxf(0.0, vehicle_health - abs(speed) * 0.018)
+        var next := car
+        var steps := maxi(1, int(ceil(motion.length() / 5.0)))
+        var step := motion / float(steps)
+        for i in range(steps):
+            var candidate := next + step
+            if not _static_blocked(candidate, _vehicle_radius(vehicle_kind)) and _vehicle_clear(candidate, vehicle_kind):
+                next = candidate
+            else:
+                break
+        if next.distance_to(car + motion) > 1.0:
+            if abs(speed) > 65.0 and car_invulnerability <= 0.0:
+                vehicle_health = maxf(0.0, vehicle_health - abs(speed) * 0.035)
+                car_invulnerability = 0.35
             speed = 0.0
         car = next
         player = car
@@ -259,51 +304,61 @@ func _process(delta: float) -> void:
         player = _move_safely(player, move * 230.0 * delta, 11.0)
     if Input.is_key_pressed(KEY_E) and not _e_held:
         if driving:
-            var exit_pos := car + Vector2.RIGHT.rotated(angle) * 58.0
+            var exit_pos := car + Vector2.RIGHT.rotated(angle) * (_vehicle_radius(vehicle_kind) + 25.0)
             if not _blocked(exit_pos, 11.0):
                 driving = false
                 player = exit_pos
                 speed = 0.0
         else:
-            var closest := player.distance_to(car)
-            var chosen := -1
-            var moving := -1
+            # Find the closest car, including moving traffic; the original car
+            # must not take priority just because it is already selected.
+            var nearest := 105.0
+            var source := ""
+            var index := -1
+            var d := player.distance_to(car)
+            if d < nearest:
+                nearest = d
+                source = "own"
             for i in range(parked.size()):
-                var distance := player.distance_to(parked[i]["pos"])
-                if distance < closest:
-                    closest = distance
-                    chosen = i
-                    moving = -1
+                d = player.distance_to(parked[i]["pos"])
+                if d < nearest:
+                    nearest = d
+                    source = "parked"
+                    index = i
             for i in range(traffic.size()):
-                var distance := player.distance_to(traffic[i]["pos"])
-                if distance < closest:
-                    closest = distance
-                    chosen = -1
-                    moving = i
-            if closest < 90.0:
-                if moving >= 0:
-                    var selected: Dictionary = traffic[moving]
-                    var stolen_pos: Vector2 = selected["pos"]
-                    var direction: Vector2 = selected["dir"]
-                    var kind := int(selected.get("kind", moving % VEHICLE_SIZES.size()))
-                    traffic.remove_at(moving)
+                d = player.distance_to(traffic[i]["pos"])
+                if d < nearest:
+                    nearest = d
+                    source = "traffic"
+                    index = i
+            if source != "":
+                if source == "traffic":
+                    var stolen: Dictionary = traffic[index]
+                    var stolen_pos: Vector2 = stolen["pos"]
+                    var direction: Vector2 = stolen["dir"]
+                    var stolen_kind := int(stolen["kind"])
+                    traffic.remove_at(index)
                     parked.append({"pos": car, "kind": vehicle_kind, "health": vehicle_health})
                     car = stolen_pos
-                    vehicle_kind = kind
+                    vehicle_kind = stolen_kind
                     vehicle_health = 100.0
-                    angle = direction.angle() + PI / 2.0
-                    var driver_pos := stolen_pos + Vector2(58.0, 0.0)
-                    if not _blocked(driver_pos, 11.0):
+                    angle = direction.angle() + PI * 0.5
+                    # Driver appears next to the vehicle and becomes a pedestrian.
+                    var driver_pos := stolen_pos + Vector2.RIGHT.rotated(angle) * (_vehicle_radius(stolen_kind) + 19.0)
+                    if not _static_blocked(driver_pos, 10.0):
                         pedestrians.append({"pos": driver_pos, "origin": driver_pos, "phase": 0.0, "axis": 0})
-                elif chosen >= 0:
-                    var selected: Dictionary = parked[chosen]
-                    parked.remove_at(chosen)
+                elif source == "parked":
+                    var selected: Dictionary = parked[index]
+                    parked.remove_at(index)
                     parked.append({"pos": car, "kind": vehicle_kind, "health": vehicle_health})
                     car = selected["pos"]
-                    vehicle_kind = selected["kind"]
-                    vehicle_health = selected["health"]
+                    vehicle_kind = int(selected["kind"])
+                    vehicle_health = float(selected["health"])
                     angle = 0.0
                 driving = vehicle_health > 0.0
+                if driving:
+                    player = car
+                    speed = 0.0
     _e_held = Input.is_key_pressed(KEY_E)
     camera.position = player
     var target_zoom := 1.55
@@ -312,7 +367,7 @@ func _process(delta: float) -> void:
     camera.zoom = camera.zoom.lerp(Vector2(target_zoom, target_zoom), clampf(delta * 2.5, 0.0, 1.0))
     vehicle_bar.value = vehicle_health
     vehicle_bar.visible = driving
-    status_label.text = ("Vehicle: " + VEHICLE_NAMES[vehicle_kind] + "  |  Damage: " + str(roundi(100.0 - vehicle_health)) + "%" if driving else "On foot  |  E: Take nearby vehicle")
+    status_label.text = ("Vehicle: " + VEHICLE_NAMES[vehicle_kind] + "  |  Damage: " + str(roundi(100.0 - vehicle_health)) + "%" if driving else "On foot  |  E: Take nearest vehicle")
     for i in range(health_tiles.get_child_count()):
         var tile: ColorRect = health_tiles.get_child(i)
         tile.color = Color("43c978") if health > float(i) * 10.0 else Color("d95454")
@@ -438,20 +493,39 @@ func _draw() -> void:
 
 func _draw_vehicle(pos: Vector2, rotation: float, kind: int, condition: float) -> void:
     var size: Vector2 = VEHICLE_SIZES[kind]
+    var w := size.x
+    var h := size.y
     draw_set_transform(pos, rotation)
-    var body := Color(VEHICLE_COLORS[kind])
-    body = body.darkened((1.0 - condition) * 0.5)
-    draw_rect(Rect2(-size.x * 0.5 + 4.0, -size.y * 0.5 + 6.0, size.x, size.y), Color(0, 0, 0, 0.2))
-    draw_rect(Rect2(-size * 0.5, size), body)
-    if kind == 4 or kind == 5:
-        draw_rect(Rect2(-size.x * 0.25, -size.y * 0.15, size.x * 0.5, size.y * 0.3), Color("273e4b"))
-    else:
-        draw_rect(Rect2(-size.x * 0.42, -size.y * 0.27, size.x * 0.84, size.y * 0.23), Color("344f63"))
-        if kind == 2 or kind == 3:
-            draw_rect(Rect2(-size.x * 0.42, size.y * 0.13, size.x * 0.84, size.y * 0.32), Color("6b7378"))
-        else:
-            draw_rect(Rect2(-size.x * 0.42, size.y * 0.12, size.x * 0.84, size.y * 0.19), Color("344f63"))
+    var paint := Color(VEHICLE_COLORS[kind]).darkened((1.0 - condition) * 0.45)
+    draw_rect(Rect2(-w * 0.5 + 5, -h * 0.5 + 7, w, h), Color(0, 0, 0, 0.25))
+    # Tires, wheel wells and body trim.
     for side in [-1.0, 1.0]:
-        draw_rect(Rect2(side * size.x * 0.5 - (5.0 if side > 0 else 0.0), -size.y * 0.34, 5, 15), Color("22242a"))
-        draw_rect(Rect2(side * size.x * 0.5 - (5.0 if side > 0 else 0.0), size.y * 0.17, 5, 15), Color("22242a"))
+        var wx := -w * 0.5 - 3.0 if side < 0 else w * 0.5 - 2.0
+        draw_rect(Rect2(wx, -h * 0.36, 5, 19), Color("171e23"))
+        draw_rect(Rect2(wx, h * 0.18, 5, 19), Color("171e23"))
+    draw_rect(Rect2(-w * 0.5, -h * 0.5, w, h), paint)
+    draw_rect(Rect2(-w * 0.5 + 3, -h * 0.5 + 4, w - 6, h - 8), paint.lightened(0.08), false, 1.5)
+    if kind == 4 or kind == 5:
+        draw_rect(Rect2(-w * 0.26, -h * 0.16, w * 0.52, h * 0.32), Color("253b4c"))
+        draw_circle(Vector2(0, -h * 0.06), 5, Color("31353b"))
+    else:
+        draw_rect(Rect2(-w * 0.41, -h * 0.28, w * 0.82, h * 0.23), Color("395c72"))
+        draw_line(Vector2(-w * 0.36, -h * 0.05), Vector2(w * 0.36, -h * 0.05), Color("b7d0d5"), 2.0)
+        if kind == 2 or kind == 3:
+            draw_rect(Rect2(-w * 0.41, h * 0.13, w * 0.82, h * 0.30), Color("59666e"))
+            if kind == 2:
+                for i in range(3):
+                    draw_line(Vector2(-w * 0.34, h * (0.18 + i * 0.07)), Vector2(w * 0.34, h * (0.18 + i * 0.07)), Color("839097"), 1.0)
+        else:
+            draw_rect(Rect2(-w * 0.41, h * 0.10, w * 0.82, h * 0.19), Color("395c72"))
+        draw_line(Vector2(0, -h * 0.49), Vector2(0, -h * 0.31), paint.darkened(0.22), 1.0)
+    # Headlamps face the front (-Y); red taillamps face the rear (+Y).
+    var lamp_w := maxf(4.0, w * 0.19)
+    for side in [-1.0, 1.0]:
+        var lamp_x := -w * 0.39 if side < 0 else w * 0.39 - lamp_w
+        draw_rect(Rect2(lamp_x, -h * 0.5 + 2, lamp_w, 6), Color("fff3c1"))
+        draw_rect(Rect2(lamp_x, h * 0.5 - 8, lamp_w, 6), Color("f0443e"))
+        draw_rect(Rect2(lamp_x, h * 0.5 - 10, lamp_w, 2), Color("ff9a63"))
+    draw_rect(Rect2(-w * 0.24, -h * 0.5 + 1, w * 0.48, 3), Color("28323b"))
+    draw_rect(Rect2(-w * 0.24, h * 0.5 - 4, w * 0.48, 3), Color("28323b"))
     draw_set_transform(Vector2.ZERO, 0.0)
