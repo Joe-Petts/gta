@@ -25,6 +25,9 @@ const VEHICLE_SIZES := [Vector2(42, 80), Vector2(49, 95), Vector2(48, 90), Vecto
 var health_bar: ProgressBar
 var vehicle_bar: ProgressBar
 var status_label: Label
+var health_tiles: HBoxContainer
+var last_hit := -10.0
+var game_time := 0.0
 
 
 func _setup_world() -> void:
@@ -50,19 +53,22 @@ func _setup_world() -> void:
                 blockers.append(Rect2(p + Vector2(155, 152), Vector2(120, 122)))
     for n in range(-2, 3):
         var road := float(n) * BLOCK
-        traffic.append({"pos": Vector2(-1000.0 + n * 120.0, road + 30), "dir": Vector2.RIGHT})
+        traffic.append({"kind": (n + 3) % 6, "pos": Vector2(-1000.0 + n * 120.0, road + 30), "dir": Vector2.RIGHT})
         traffic.append({"pos": Vector2(1000.0 - n * 120.0, road - 30), "dir": Vector2.LEFT})
         traffic.append({"pos": Vector2(road - 30, -900.0 + n * 130.0), "dir": Vector2.DOWN})
         traffic.append({"pos": Vector2(road + 30, 900.0 - n * 130.0), "dir": Vector2.UP})
 
 func _setup_people_and_vehicles() -> void:
-    var kinds := [1, 2, 3, 4, 5]
-    for i in range(kinds.size()):
-        parked.append({"pos": Vector2(-880.0 + float(i) * 440.0, -440.0 + 34.0), "kind": kinds[i], "health": 100.0})
+    # Parked vehicles stay off the active lanes and intersections.
+    parked.clear()
+    for i in range(5):
+        var lane := float(i - 2) * BLOCK
+        parked.append({"pos": Vector2(lane + 111.0, -1320.0), "kind": i + 1, "health": 100.0})
     for i in range(24):
         var col := i % 6 - 3
-        var row := i / 6 - 2
-        pedestrians.append({"pos": Vector2(float(col) * BLOCK + 102.0, float(row) * BLOCK + 120.0), "origin": Vector2(float(col) * BLOCK + 102.0, float(row) * BLOCK + 120.0), "phase": float(i) * 1.7, "axis": i % 2})
+        var row := int(i / 6) - 2
+        var origin := Vector2(float(col) * BLOCK + 102.0, float(row) * BLOCK + 120.0)
+        pedestrians.append({"pos": origin, "origin": origin, "phase": float(i) * 1.7, "axis": i % 2})
 
 func _make_bar(ui: CanvasLayer, at: Vector2, tint: Color) -> ProgressBar:
     var bar := ProgressBar.new()
@@ -122,8 +128,13 @@ func _move_safely(pos: Vector2, motion: Vector2, radius: float) -> Vector2:
 
 func _traffic_tick(delta: float) -> void:
     light_time = fmod(light_time + delta, 14.0)
-    for vehicle in traffic:
-        var pos: Vector2 = vehicle["pos"]
+    # Snapshot positions so updates cannot let one car drive through another.
+    var old_positions: Array[Vector2] = []
+    for item in traffic:
+        old_positions.append(item["pos"])
+    for i in range(traffic.size()):
+        var vehicle: Dictionary = traffic[i]
+        var pos: Vector2 = old_positions[i]
         var dir: Vector2 = vehicle["dir"]
         var axis := pos.x if abs(dir.x) > 0.5 else pos.y
         var heading := dir.x if abs(dir.x) > 0.5 else dir.y
@@ -131,23 +142,47 @@ func _traffic_tick(delta: float) -> void:
         var stop := false
         if red:
             for n in range(-3, 4):
-                var dist := (float(n) * BLOCK - axis) * heading
-                if dist >= 76.0 and dist < 79.0 + 100.0 * delta:
+                var distance := (float(n) * BLOCK - axis) * heading
+                if distance >= 76.0 and distance < 79.0 + 100.0 * delta:
                     stop = true
+        var next := pos + dir * 100.0 * delta
+        if next.distance_to(car) < 74.0:
+            stop = true
+        for j in range(traffic.size()):
+            if i == j:
+                continue
+            var other: Vector2 = old_positions[j]
+            # A vehicle in the lane ahead, or one crossing our path.
+            var forward := (other - pos).dot(dir)
+            var lateral := absf((other - pos).cross(dir))
+            if forward > -12.0 and forward < 98.0 and lateral < 49.0:
+                stop = true
+                break
+            if next.distance_to(other) < 56.0:
+                stop = true
+                break
         if not stop:
-            var next := pos + dir * 100.0 * delta
-            if next.distance_to(car) > 53.0:
-                pos = next
+            pos = next
+        # Re-entry is only allowed if the destination is clear.
+        var wrapped := pos
         if pos.x > 1390.0:
-            pos.x = -1390.0
-        if pos.x < -1390.0:
-            pos.x = 1390.0
+            wrapped.x = -1390.0
+        elif pos.x < -1390.0:
+            wrapped.x = 1390.0
         if pos.y > 1390.0:
-            pos.y = -1390.0
-        if pos.y < -1390.0:
-            pos.y = 1390.0
+            wrapped.y = -1390.0
+        elif pos.y < -1390.0:
+            wrapped.y = 1390.0
+        if wrapped != pos:
+            var free := wrapped.distance_to(car) > 95.0
+            for j in range(traffic.size()):
+                if i != j and wrapped.distance_to(old_positions[j]) < 110.0:
+                    free = false
+            if free:
+                pos = wrapped
+            else:
+                pos = old_positions[i]
         vehicle["pos"] = pos
-
 
 func _ready() -> void:
     camera = Camera2D.new()
@@ -160,20 +195,36 @@ func _ready() -> void:
     hud = Label.new()
     hud.position = Vector2(18, 18)
     hud.add_theme_font_size_override("font_size", 18)
-    hud.text = "FIRST DRIVE 0.2  |  WASD: Move / Drive   E: Enter / Exit   Space: Brake"
+    hud.text = "FIRST DRIVE 0.5  |  WASD: Move / Drive   E: Enter / Exit   Space: Brake"
     ui.add_child(hud)
     _setup_world()
     _setup_people_and_vehicles()
     camera.zoom = Vector2(1.55, 1.55)
-    health_bar = _make_bar(ui, Vector2(18, 58), Color("4abf75"))
-    vehicle_bar = _make_bar(ui, Vector2(18, 110), Color("e7a54e"))
+    # HUD anchors to the upper-right corner, not the game world.
+    health_tiles = HBoxContainer.new()
+    health_tiles.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+    health_tiles.anchor_left = 1.0
+    health_tiles.anchor_right = 1.0
+    health_tiles.offset_left = -268.0
+    health_tiles.offset_right = -18.0
+    health_tiles.offset_top = 18.0
+    health_tiles.offset_bottom = 40.0
+    health_tiles.add_theme_constant_override("separation", 4)
+    ui.add_child(health_tiles)
+    for i in range(10):
+        var tile := ColorRect.new()
+        tile.custom_minimum_size = Vector2(20, 20)
+        tile.color = Color("43c978")
+        health_tiles.add_child(tile)
+    vehicle_bar = _make_bar(ui, Vector2(18, 56), Color("e7a54e"))
     status_label = Label.new()
-    status_label.position = Vector2(18, 145)
+    status_label.position = Vector2(18, 88)
     status_label.add_theme_font_size_override("font_size", 16)
     ui.add_child(status_label)
     queue_redraw()
 
 func _process(delta: float) -> void:
+    game_time += delta
     _traffic_tick(delta)
     _update_pedestrians(delta)
     var move := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
@@ -188,8 +239,6 @@ func _process(delta: float) -> void:
         if next.distance_to(car + motion) > 2.0:
             if abs(speed) > 65.0:
                 vehicle_health = maxf(0.0, vehicle_health - abs(speed) * 0.018)
-                if vehicle_health <= 0.0:
-                    speed = 0.0
             speed = 0.0
         car = next
         player = car
@@ -205,13 +254,35 @@ func _process(delta: float) -> void:
         else:
             var closest := player.distance_to(car)
             var chosen := -1
+            var moving := -1
             for i in range(parked.size()):
                 var distance := player.distance_to(parked[i]["pos"])
                 if distance < closest:
                     closest = distance
                     chosen = i
-            if closest < 85.0:
-                if chosen >= 0:
+                    moving = -1
+            for i in range(traffic.size()):
+                var distance := player.distance_to(traffic[i]["pos"])
+                if distance < closest:
+                    closest = distance
+                    chosen = -1
+                    moving = i
+            if closest < 90.0:
+                if moving >= 0:
+                    var selected: Dictionary = traffic[moving]
+                    var stolen_pos: Vector2 = selected["pos"]
+                    var direction: Vector2 = selected["dir"]
+                    var kind := int(selected.get("kind", moving % VEHICLE_SIZES.size()))
+                    traffic.remove_at(moving)
+                    parked.append({"pos": car, "kind": vehicle_kind, "health": vehicle_health})
+                    car = stolen_pos
+                    vehicle_kind = kind
+                    vehicle_health = 100.0
+                    angle = direction.angle() + PI / 2.0
+                    var driver_pos := stolen_pos + Vector2(58.0, 0.0)
+                    if not _blocked(driver_pos, 11.0):
+                        pedestrians.append({"pos": driver_pos, "origin": driver_pos, "phase": 0.0, "axis": 0})
+                elif chosen >= 0:
                     var selected: Dictionary = parked[chosen]
                     parked.remove_at(chosen)
                     parked.append({"pos": car, "kind": vehicle_kind, "health": vehicle_health})
@@ -226,10 +297,12 @@ func _process(delta: float) -> void:
     if driving:
         target_zoom = lerpf(1.55, 0.94, clampf(abs(speed) / 380.0, 0.0, 1.0))
     camera.zoom = camera.zoom.lerp(Vector2(target_zoom, target_zoom), clampf(delta * 2.5, 0.0, 1.0))
-    health_bar.value = health
     vehicle_bar.value = vehicle_health
     vehicle_bar.visible = driving
-    status_label.text = ("Vehicle: " + VEHICLE_NAMES[vehicle_kind] + "  |  Damage: " + str(roundi(100.0 - vehicle_health)) + "%" if driving else "On foot  |  E: Enter nearby vehicle") + "  |  Health: " + str(roundi(health))
+    status_label.text = ("Vehicle: " + VEHICLE_NAMES[vehicle_kind] + "  |  Damage: " + str(roundi(100.0 - vehicle_health)) + "%" if driving else "On foot  |  E: Take nearby vehicle")
+    for i in range(health_tiles.get_child_count()):
+        var tile: ColorRect = health_tiles.get_child(i)
+        tile.color = Color("43c978") if health > float(i) * 10.0 else Color("d95454")
     queue_redraw()
 
 func _building(p: Vector2, size: Vector2, roof: Color, windows: bool = true) -> void:
