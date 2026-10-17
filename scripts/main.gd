@@ -183,7 +183,23 @@ func _police_update(delta: float) -> void:
         if absf(difference) > 0.45:
             desired_speed = minf(desired_speed, 42.0)
         velocity = move_toward(velocity, desired_speed, (230.0 if desired_speed < velocity else 120.0) * delta)
-        heading += clampf(difference, -1.0, 1.0) * 1.85 * clampf(absf(velocity) / 80.0, 0.15, 1.0) * delta
+        var proposed_heading: float = heading + clampf(difference, -1.0, 1.0) * 1.85 * clampf(absf(velocity) / 80.0, 0.15, 1.0) * delta
+        # Rotation alone can cause an overlap; validate the entire body first.
+        var turn_clear: bool = _road_clear(pos, proposed_heading)
+        if _overlaps(pos, proposed_heading, 0, car, angle, vehicle_kind, 5.0):
+            turn_clear = false
+        for vehicle in traffic:
+            if _overlaps(pos, proposed_heading, 0, vehicle["pos"], _angle_for(vehicle["dir"]), int(vehicle["kind"]), 5.0):
+                turn_clear = false
+                break
+        for vehicle in parked:
+            if _overlaps(pos, proposed_heading, 0, vehicle["pos"], 0.0, int(vehicle["kind"]), 5.0):
+                turn_clear = false
+                break
+        if turn_clear:
+            heading = proposed_heading
+        else:
+            velocity = 0.0
         var motion := Vector2.UP.rotated(heading) * velocity * delta
         var steps := maxi(1, int(ceil(motion.length() / 3.0)))
         for i in range(steps):
