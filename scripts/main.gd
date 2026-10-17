@@ -129,14 +129,85 @@ func _police_update(delta: float) -> void:
         return
     for cop in police:
         var pos: Vector2 = cop["pos"]
-        var delta_pos := player - pos
-        if delta_pos.length() > 20.0:
-            var candidate := pos + delta_pos.normalized() * 125.0 * delta
-            if not _static_blocked(candidate, 24.0):
-                cop["pos"] = candidate
-        if cop["pos"].distance_to(player) < 48.0 and game_time - last_hit > 1.5:
+        var heading: float = float(cop.get("angle", 0.0))
+        var velocity: float = float(cop.get("speed", 0.0))
+        var target: Vector2 = player - pos
+        var distance: float = target.length()
+        var forward := Vector2.UP.rotated(heading)
+        if distance > 1.0:
+            var desired: float = target.angle() + PI * 0.5
+            var difference: float = wrapf(desired - heading, -PI, PI)
+            # Cars rotate only while moving, rather than sliding sideways.
+            var steering: float = clampf(difference, -1.0, 1.0)
+            var turn_rate: float = 1.65 * clampf(absf(velocity) / 90.0, 0.12, 1.0)
+            heading += steering * turn_rate * delta
+            forward = Vector2.UP.rotated(heading)
+        var safe_distance: float = 86.0 if driving else 53.0
+        var desired_speed: float = 175.0 if distance > safe_distance + 90.0 else 0.0
+        if absf(wrapf(target.angle() + PI * 0.5 - heading, -PI, PI)) > 1.15:
+            desired_speed = minf(desired_speed, 55.0)
+        velocity = move_toward(velocity, desired_speed, (210.0 if desired_speed < velocity else 125.0) * delta)
+        var motion := forward * velocity * delta
+        var steps := maxi(1, int(ceil(motion.length() / 4.0)))
+        var step := motion / float(steps)
+        for i in range(steps):
+            var candidate := pos + step
+            var blocked := false
+            var half := VEHICLE_SIZES[0] * 0.5
+            for dx in [-1.0, 1.0]:
+                for dy in [-1.0, 1.0]:
+                    if _static_blocked(candidate + Vector2(dx * half.x, dy * half.y).rotated(heading), 1.0):
+                        blocked = true
+            if _overlaps(candidate, heading, 0, car, angle, vehicle_kind, 8.0):
+                blocked = true
+            for vehicle in traffic:
+                if _overlaps(candidate, heading, 0, vehicle["pos"], _angle_for(vehicle["dir"]), int(vehicle["kind"]), 5.0):
+                    blocked = true
+                    break
+            for vehicle in parked:
+                if _overlaps(candidate, heading, 0, vehicle["pos"], 0.0, int(vehicle["kind"]), 5.0):
+                    blocked = true
+                    break
+            if blocked:
+                velocity = 0.0
+                break
+            pos = candidate
+        cop["pos"] = pos
+        cop["angle"] = heading
+        cop["speed"] = velocity
+        if pos.distance_to(player) < 56.0 and game_time - last_hit > 1.5:
             health = maxf(0.0, health - 10.0)
             last_hit = game_time
+
+func _draw_police_car(pos: Vector2, heading: float) -> void:
+    draw_set_transform(pos, heading)
+    # Vehicle front points towards local -Y, matching the steering physics.
+    draw_rect(Rect2(-25, -44, 50, 90), Color(0, 0, 0, 0.27))
+    for side in [-1.0, 1.0]:
+        var wheel_x := -27.0 if side < 0.0 else 22.0
+        draw_rect(Rect2(wheel_x, -30, 6, 20), Color("1b2026"))
+        draw_rect(Rect2(wheel_x, 19, 6, 20), Color("1b2026"))
+    draw_rect(Rect2(-23, -44, 46, 88), Color("e6e9e9"))
+    draw_rect(Rect2(-23, -12, 46, 32), Color("245c9b"))
+    draw_rect(Rect2(-19, -30, 38, 17), Color("344d63"))
+    draw_rect(Rect2(-19, 23, 38, 13), Color("344d63"))
+    draw_rect(Rect2(-18, -42, 12, 6), Color("fff1bd"))
+    draw_rect(Rect2(6, -42, 12, 6), Color("fff1bd"))
+    draw_rect(Rect2(-18, 38, 12, 5), Color("e74242"))
+    draw_rect(Rect2(6, 38, 12, 5), Color("e74242"))
+    draw_rect(Rect2(-20, -7, 40, 15), Color("f3f5f4"))
+    draw_line(Vector2(-16, 0), Vector2(16, 0), Color("244e7a"), 2.0)
+    # Alternating red and blue roof lights with a subtle light halo.
+    var flash := int(game_time * 7.0) % 2 == 0
+    var left := Color("e9323d") if flash else Color("6b1e29")
+    var right := Color("255fff") if not flash else Color("172b68")
+    draw_circle(Vector2(-12, -10), 16, Color(1.0, 0.13, 0.15, 0.18) if flash else Color(0.0, 0.0, 0.0, 0.0))
+    draw_circle(Vector2(12, -10), 16, Color(0.12, 0.35, 1.0, 0.2) if not flash else Color(0.0, 0.0, 0.0, 0.0))
+    draw_rect(Rect2(-20, -15, 40, 10), Color("202a34"))
+    draw_rect(Rect2(-18, -14, 17, 8), left)
+    draw_rect(Rect2(1, -14, 17, 8), right)
+    draw_set_transform(Vector2.ZERO, 0.0)
+
 
 func _vehicle_radius(kind: int) -> float:
     var size: Vector2 = VEHICLE_SIZES[kind]
@@ -378,7 +449,7 @@ func _process(delta: float) -> void:
                     pedestrians.remove_at(i)
                     wanted = 1
                     if police.is_empty():
-                        police.append({"pos": player + Vector2(0, -300)})
+                        police.append({"pos": player + Vector2(0, -300), "angle": PI, "speed": 0.0})
     else:
         player = _move_safely(player, move * 230.0 * delta, 11.0)
     if Input.is_key_pressed(KEY_E) and not _e_held:
@@ -576,8 +647,7 @@ func _draw() -> void:
         _draw_vehicle(p, dir.angle() + PI / 2.0, int(vehicle["kind"]), 1.0)
     draw_set_transform(Vector2.ZERO, 0.0)
     for cop in police:
-        _draw_vehicle(cop["pos"], 0.0, 0, 1.0)
-        draw_circle(cop["pos"], 6.0, Color("245bd5"))
+        _draw_police_car(cop["pos"], float(cop.get("angle", 0.0)))
     for item in parked:
         _draw_vehicle(item["pos"], 0.0, item["kind"], 1.0)
     for person in pedestrians:
