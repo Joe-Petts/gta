@@ -14,6 +14,18 @@ var _e_held := false
 var blockers: Array[Rect2] = []
 var traffic: Array[Dictionary] = []
 var light_time := 0.0
+var health := 100.0
+var vehicle_health := 100.0
+var vehicle_kind := 0
+var parked: Array[Dictionary] = []
+var pedestrians: Array[Dictionary] = []
+const VEHICLE_NAMES := ["Sedan", "Van", "Pickup", "Truck", "Motorcycle", "Quad"]
+const VEHICLE_COLORS := ["e8b746", "6da2bd", "c46e58", "8a9b72", "d85c59", "d8b86d"]
+const VEHICLE_SIZES := [Vector2(42, 80), Vector2(49, 95), Vector2(48, 90), Vector2(57, 130), Vector2(21, 62), Vector2(34, 57)]
+var health_bar: ProgressBar
+var vehicle_bar: ProgressBar
+var status_label: Label
+
 
 func _setup_world() -> void:
     for x in range(-3, 3):
@@ -43,6 +55,42 @@ func _setup_world() -> void:
         traffic.append({"pos": Vector2(road - 30, -900.0 + n * 130.0), "dir": Vector2.DOWN})
         traffic.append({"pos": Vector2(road + 30, 900.0 - n * 130.0), "dir": Vector2.UP})
 
+func _setup_people_and_vehicles() -> void:
+    var kinds := [1, 2, 3, 4, 5]
+    for i in range(kinds.size()):
+        parked.append({"pos": Vector2(-880.0 + float(i) * 440.0, -440.0 + 34.0), "kind": kinds[i], "health": 100.0})
+    for i in range(24):
+        var col := i % 6 - 3
+        var row := i / 6 - 2
+        pedestrians.append({"pos": Vector2(float(col) * BLOCK + 102.0, float(row) * BLOCK + 120.0), "origin": Vector2(float(col) * BLOCK + 102.0, float(row) * BLOCK + 120.0), "phase": float(i) * 1.7, "axis": i % 2})
+
+func _make_bar(ui: CanvasLayer, at: Vector2, tint: Color) -> ProgressBar:
+    var bar := ProgressBar.new()
+    bar.position = at
+    bar.size = Vector2(180, 20)
+    bar.max_value = 100.0
+    bar.value = 100.0
+    bar.show_percentage = false
+    var fill := StyleBoxFlat.new()
+    fill.bg_color = tint
+    bar.add_theme_stylebox_override("fill", fill)
+    ui.add_child(bar)
+    return bar
+
+func _update_pedestrians(delta: float) -> void:
+    for person in pedestrians:
+        var p: Vector2 = person["pos"]
+        var origin: Vector2 = person["origin"]
+        var phase: float = person["phase"]
+        var axis: int = person["axis"]
+        var desired := origin + (Vector2(0, sin(light_time * 0.7 + phase) * 72.0) if axis == 0 else Vector2(sin(light_time * 0.7 + phase) * 72.0, 0))
+        var away := p - car
+        if away.length() < 85.0:
+            desired = p + away.normalized() * 70.0
+        var next := p.move_toward(desired, 55.0 * delta)
+        if not _blocked(next, 9.0, false):
+            person["pos"] = next
+
 func _blocked(pos: Vector2, radius: float, check_traffic: bool = true) -> bool:
     if abs(pos.x) + radius > WORLD / 2.0 or abs(pos.y) + radius > WORLD / 2.0:
         return true
@@ -51,6 +99,10 @@ func _blocked(pos: Vector2, radius: float, check_traffic: bool = true) -> bool:
         if q.distance_squared_to(pos) < radius * radius:
             return true
     if check_traffic:
+        for item in parked:
+            var parked_pos: Vector2 = item["pos"]
+            if parked_pos.distance_squared_to(pos) < (radius + 29.0) * (radius + 29.0):
+                return true
         for vehicle in traffic:
             var p: Vector2 = vehicle["pos"]
             if p.distance_squared_to(pos) < (radius + 23.0) * (radius + 23.0):
@@ -111,10 +163,19 @@ func _ready() -> void:
     hud.text = "FIRST DRIVE 0.2  |  WASD: Move / Drive   E: Enter / Exit   Space: Brake"
     ui.add_child(hud)
     _setup_world()
+    _setup_people_and_vehicles()
+    camera.zoom = Vector2(1.55, 1.55)
+    health_bar = _make_bar(ui, Vector2(18, 58), Color("4abf75"))
+    vehicle_bar = _make_bar(ui, Vector2(18, 110), Color("e7a54e"))
+    status_label = Label.new()
+    status_label.position = Vector2(18, 145)
+    status_label.add_theme_font_size_override("font_size", 16)
+    ui.add_child(status_label)
     queue_redraw()
 
 func _process(delta: float) -> void:
     _traffic_tick(delta)
+    _update_pedestrians(delta)
     var move := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
     if driving:
         speed = move_toward(speed, -move.y * 380.0, 350.0 * delta)
@@ -123,8 +184,12 @@ func _process(delta: float) -> void:
         if abs(speed) > 5.0:
             angle += move.x * 2.3 * delta * sign(speed)
         var motion := Vector2.UP.rotated(angle) * speed * delta
-        var next := _move_safely(car, motion, 22.0)
+        var next := _move_safely(car, motion, VEHICLE_SIZES[vehicle_kind].x * 0.52)
         if next.distance_to(car + motion) > 2.0:
+            if abs(speed) > 65.0:
+                vehicle_health = maxf(0.0, vehicle_health - abs(speed) * 0.018)
+                if vehicle_health <= 0.0:
+                    speed = 0.0
             speed = 0.0
         car = next
         player = car
@@ -137,10 +202,34 @@ func _process(delta: float) -> void:
                 driving = false
                 player = exit_pos
                 speed = 0.0
-        elif player.distance_to(car) < 85.0:
-            driving = true
+        else:
+            var closest := player.distance_to(car)
+            var chosen := -1
+            for i in range(parked.size()):
+                var distance := player.distance_to(parked[i]["pos"])
+                if distance < closest:
+                    closest = distance
+                    chosen = i
+            if closest < 85.0:
+                if chosen >= 0:
+                    var selected: Dictionary = parked[chosen]
+                    parked.remove_at(chosen)
+                    parked.append({"pos": car, "kind": vehicle_kind, "health": vehicle_health})
+                    car = selected["pos"]
+                    vehicle_kind = selected["kind"]
+                    vehicle_health = selected["health"]
+                    angle = 0.0
+                driving = vehicle_health > 0.0
     _e_held = Input.is_key_pressed(KEY_E)
     camera.position = player
+    var target_zoom := 1.55
+    if driving:
+        target_zoom = lerpf(1.55, 0.94, clampf(abs(speed) / 380.0, 0.0, 1.0))
+    camera.zoom = camera.zoom.lerp(Vector2(target_zoom, target_zoom), clampf(delta * 2.5, 0.0, 1.0))
+    health_bar.value = health
+    vehicle_bar.value = vehicle_health
+    vehicle_bar.visible = driving
+    status_label.text = ("Vehicle: " + VEHICLE_NAMES[vehicle_kind] + "  |  Damage: " + str(roundi(100.0 - vehicle_health)) + "%" if driving else "On foot  |  E: Enter nearby vehicle") + "  |  Health: " + str(roundi(health))
     queue_redraw()
 
 func _building(p: Vector2, size: Vector2, roof: Color, windows: bool = true) -> void:
@@ -249,14 +338,36 @@ func _draw() -> void:
         draw_rect(Rect2(-19, -32, 38, 64), Color("b96455"))
         draw_rect(Rect2(-15, -16, 30, 20), Color("354e64"))
     draw_set_transform(Vector2.ZERO, 0.0)
-    draw_set_transform(car, angle)
-    draw_rect(Rect2(-21, -40, 42, 80), Color("e8b746"))
-    draw_rect(Rect2(-17, -22, 34, 23), Color("2c4b5d"))
-    draw_rect(Rect2(-17, 8, 34, 17), Color("2c4b5d"))
-    draw_rect(Rect2(-22, -30, 4, 14), Color("20242b"))
-    draw_rect(Rect2(18, -30, 4, 14), Color("20242b"))
+    for item in parked:
+        _draw_vehicle(item["pos"], 0.0, item["kind"], 1.0)
+    for person in pedestrians:
+        var p: Vector2 = person["pos"]
+        draw_circle(p + Vector2(2, 4), 10.0, Color(0, 0, 0, 0.2))
+        draw_circle(p, 8.0, Color("d6ae8e"))
+        draw_arc(p, 9.0, 0.0, TAU, 16, Color("4d7290"), 3.0)
+    _draw_vehicle(car, angle, vehicle_kind, vehicle_health / 100.0)
     draw_set_transform(Vector2.ZERO, 0.0)
     if not driving:
         draw_circle(player + Vector2(3, 5), 13, Color(0, 0, 0, 0.25))
         draw_circle(player, 11, Color("e7c8a2"))
         draw_arc(player, 12, 0, TAU, 32, Color("294b86"), 4)
+
+func _draw_vehicle(pos: Vector2, rotation: float, kind: int, condition: float) -> void:
+    var size: Vector2 = VEHICLE_SIZES[kind]
+    draw_set_transform(pos, rotation)
+    var body := Color(VEHICLE_COLORS[kind])
+    body = body.darkened((1.0 - condition) * 0.5)
+    draw_rect(Rect2(-size.x * 0.5 + 4.0, -size.y * 0.5 + 6.0, size.x, size.y), Color(0, 0, 0, 0.2))
+    draw_rect(Rect2(-size * 0.5, size), body)
+    if kind == 4 or kind == 5:
+        draw_rect(Rect2(-size.x * 0.25, -size.y * 0.15, size.x * 0.5, size.y * 0.3), Color("273e4b"))
+    else:
+        draw_rect(Rect2(-size.x * 0.42, -size.y * 0.27, size.x * 0.84, size.y * 0.23), Color("344f63"))
+        if kind == 2 or kind == 3:
+            draw_rect(Rect2(-size.x * 0.42, size.y * 0.13, size.x * 0.84, size.y * 0.32), Color("6b7378"))
+        else:
+            draw_rect(Rect2(-size.x * 0.42, size.y * 0.12, size.x * 0.84, size.y * 0.19), Color("344f63"))
+    for side in [-1.0, 1.0]:
+        draw_rect(Rect2(side * size.x * 0.5 - (5.0 if side > 0 else 0.0), -size.y * 0.34, 5, 15), Color("22242a"))
+        draw_rect(Rect2(side * size.x * 0.5 - (5.0 if side > 0 else 0.0), size.y * 0.17, 5, 15), Color("22242a"))
+    draw_set_transform(Vector2.ZERO, 0.0)
