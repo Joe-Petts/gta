@@ -232,6 +232,9 @@ func _traffic_tick(delta: float) -> void:
         var axis := pos.x if absf(dir.x) > 0.5 else pos.y
         var heading := dir.x if absf(dir.x) > 0.5 else dir.y
         var stop := false
+        # Slow traffic near a pedestrian so the E interaction is achievable.
+        if not driving and pos.distance_to(player) < 155.0:
+            stop = true
         if red:
             for n in range(-3, 4):
                 var d := (float(n) * BLOCK - axis) * heading
@@ -358,18 +361,18 @@ func _process(delta: float) -> void:
             var source := ""
             var index := -1
             var d := player.distance_to(car)
-            if d < nearest:
+            if d < 80.0:
                 nearest = d
                 source = "own"
             for i in range(parked.size()):
                 d = player.distance_to(parked[i]["pos"])
-                if d < nearest:
+                if d < nearest and d < 115.0:
                     nearest = d
                     source = "parked"
                     index = i
             for i in range(traffic.size()):
                 d = player.distance_to(traffic[i]["pos"])
-                if d < nearest and d < _vehicle_radius(int(traffic[i]["kind"])) + 75.0:
+                if d < nearest and d < 155.0:
                     nearest = d
                     source = "traffic"
                     index = i
@@ -413,6 +416,14 @@ func _process(delta: float) -> void:
     for i in range(health_tiles.get_child_count()):
         var tile: ColorRect = health_tiles.get_child(i)
         tile.color = Color("43c978") if health > float(i) * 10.0 else Color("d95454")
+    if not driving:
+        var nearest_car := 999999.0
+        for item in traffic:
+            nearest_car = minf(nearest_car, player.distance_to(item["pos"]))
+        for item in parked:
+            nearest_car = minf(nearest_car, player.distance_to(item["pos"]))
+        if nearest_car < 155.0:
+            status_label.text = "E: Fahrzeug übernehmen"
     if wanted > 0:
         status_label.text += "  |  WANTED: POLICE"
     queue_redraw()
