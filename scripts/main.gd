@@ -31,6 +31,8 @@ var game_time := 0.0
 var wanted := 0
 var police: Array[Dictionary] = []
 var car_invulnerability := 0.0
+var crash_audio: AudioStreamPlayer
+var crash_cooldown := 0.0
 
 
 func _setup_world() -> void:
@@ -252,7 +254,7 @@ func _traffic_tick(delta: float) -> void:
         for j in range(next_positions.size()):
             if _overlaps(next, rot, kind, next_positions[j], _angle_for(traffic[j]["dir"]), int(traffic[j]["kind"]), 4.0):
                 stop = true
-        if not stop and not _static_blocked(next, 15.0):
+        if not stop and _clear_vehicle(next, rot, kind, i):
             pos = next
         var wrapped := pos
         if pos.x > 1370.0:
@@ -269,6 +271,35 @@ func _traffic_tick(delta: float) -> void:
     for i in range(traffic.size()):
         traffic[i]["pos"] = next_positions[i]
 
+func _setup_crash_sound() -> void:
+    crash_audio = AudioStreamPlayer.new()
+    add_child(crash_audio)
+    var sample := AudioStreamWAV.new()
+    sample.mix_rate = 22050
+    sample.format = AudioStreamWAV.FORMAT_16_BITS
+    var pcm := PackedByteArray()
+    var rng := RandomNumberGenerator.new()
+    rng.seed = 8731
+    for i in range(6500):
+        var t := float(i) / 22050.0
+        var envelope := pow(maxf(0.0, 1.0 - t / 0.295), 2.0)
+        var rumble := sin(TAU * (85.0 * t - 80.0 * t * t))
+        var noise := rng.randf_range(-1.0, 1.0)
+        var value := clampf((rumble * 0.55 + noise * 0.45) * envelope, -1.0, 1.0)
+        var v := int(value * 20000.0)
+        pcm.append(v & 255)
+        pcm.append((v >> 8) & 255)
+    sample.data = pcm
+    crash_audio.stream = sample
+    crash_audio.volume_db = -7.0
+
+func _play_crash(intensity: float) -> void:
+    if crash_cooldown > 0.0:
+        return
+    crash_cooldown = 0.28
+    crash_audio.volume_db = lerpf(-17.0, -2.0, clampf(intensity / 350.0, 0.0, 1.0))
+    crash_audio.play()
+
 func _ready() -> void:
     camera = Camera2D.new()
     camera.position_smoothing_enabled = true
@@ -284,6 +315,7 @@ func _ready() -> void:
     ui.add_child(hud)
     _setup_world()
     _setup_people_and_vehicles()
+    _setup_crash_sound()
     camera.zoom = Vector2(1.55, 1.55)
     # HUD anchors to the upper-right corner, not the game world.
     health_tiles = HBoxContainer.new()
@@ -310,6 +342,7 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
     game_time += delta
+    crash_cooldown = maxf(0.0, crash_cooldown - delta)
     car_invulnerability = maxf(0.0, car_invulnerability - delta)
     _traffic_tick(delta)
     _update_pedestrians(delta)
@@ -333,6 +366,7 @@ func _process(delta: float) -> void:
                 break
         if next.distance_to(car + motion) > 1.0:
             if abs(speed) > 65.0 and car_invulnerability <= 0.0:
+                _play_crash(absf(speed))
                 vehicle_health = maxf(0.0, vehicle_health - abs(speed) * 0.035)
                 car_invulnerability = 0.35
             speed = 0.0
@@ -501,6 +535,15 @@ func _draw() -> void:
             var d := m * 115.0 + 25.0
             draw_rect(Rect2(v - 2, d, 4, 52), Color("c9b975"))
             draw_rect(Rect2(d, v - 2, 52, 4), Color("c9b975"))
+    # Visible concrete barriers close the streets at the city limits.
+    var edge := WORLD * 0.5 - 15.0
+    for n in range(-3, 4):
+        var lane := float(n) * BLOCK
+        for k in range(-3, 4):
+            var off := float(k) * 20.0
+            for side in [-1.0, 1.0]:
+                draw_rect(Rect2(Vector2(side * edge - 10.0, lane + off - 9.0), Vector2(20, 18)), Color("d7d6cb"))
+                draw_rect(Rect2(Vector2(lane + off - 9.0, side * edge - 10.0), Vector2(18, 20)), Color("d7d6cb"))
     # Crosswalks at intersections.
     for x in range(-3, 4):
         for y in range(-3, 4):
