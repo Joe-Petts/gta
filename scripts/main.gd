@@ -3,14 +3,99 @@ extends Node2D
 const ROAD := 150.0
 const BLOCK := 440.0
 const WORLD := 2800.0
-var player := Vector2(120, 120)
-var car := Vector2(270, 100)
+var player := Vector2(220, 30)
+var car := Vector2(270, 30)
 var angle := 0.0
 var speed := 0.0
 var driving := false
 var camera: Camera2D
 var hud: Label
 var _e_held := false
+var blockers: Array[Rect2] = []
+var traffic: Array[Dictionary] = []
+var light_time := 0.0
+
+func _setup_world() -> void:
+    for x in range(-3, 3):
+        for y in range(-3, 3):
+            var p := Vector2(x * BLOCK + 90, y * BLOCK + 90)
+            if x >= 1 and y >= 1:
+                blockers.append(Rect2(p + Vector2(12, 12), Vector2(262, 132)))
+                for i in range(4):
+                    blockers.append(Rect2(p + Vector2(18 + i * 65, 185), Vector2(52, 86)))
+            elif x <= -1 and y <= -1:
+                for a in range(2):
+                    for b in range(2):
+                        blockers.append(Rect2(p + Vector2(26 + a * 145, 25 + b * 145), Vector2(87, 85)))
+            elif (x == -1 and y == 1) or (x == 0 and y == 1) or (x == -2 and y == 0):
+                pass
+            elif (x + y) % 3 == 0:
+                for i in range(3):
+                    blockers.append(Rect2(p + Vector2(22 + i * 86, 42), Vector2(28, 53)))
+            else:
+                blockers.append(Rect2(p + Vector2(14, 14), Vector2(125, 260)))
+                blockers.append(Rect2(p + Vector2(155, 14), Vector2(120, 123)))
+                blockers.append(Rect2(p + Vector2(155, 152), Vector2(120, 122)))
+    for n in range(-2, 3):
+        var road := float(n) * BLOCK
+        traffic.append({"pos": Vector2(-1000.0 + n * 120.0, road + 30), "dir": Vector2.RIGHT})
+        traffic.append({"pos": Vector2(1000.0 - n * 120.0, road - 30), "dir": Vector2.LEFT})
+        traffic.append({"pos": Vector2(road - 30, -900.0 + n * 130.0), "dir": Vector2.DOWN})
+        traffic.append({"pos": Vector2(road + 30, 900.0 - n * 130.0), "dir": Vector2.UP})
+
+func _blocked(pos: Vector2, radius: float, check_traffic: bool = true) -> bool:
+    if abs(pos.x) + radius > WORLD / 2.0 or abs(pos.y) + radius > WORLD / 2.0:
+        return true
+    for rect in blockers:
+        var q := Vector2(clampf(pos.x, rect.position.x, rect.end.x), clampf(pos.y, rect.position.y, rect.end.y))
+        if q.distance_squared_to(pos) < radius * radius:
+            return true
+    if check_traffic:
+        for vehicle in traffic:
+            var p: Vector2 = vehicle["pos"]
+            if p.distance_squared_to(pos) < (radius + 23.0) * (radius + 23.0):
+                return true
+    return false
+
+func _move_safely(pos: Vector2, motion: Vector2, radius: float) -> Vector2:
+    var result := pos
+    var count := maxi(1, int(ceil(motion.length() / 8.0)))
+    var step := motion / float(count)
+    for i in range(count):
+        if not _blocked(result + Vector2(step.x, 0), radius):
+            result.x += step.x
+        if not _blocked(result + Vector2(0, step.y), radius):
+            result.y += step.y
+    return result
+
+func _traffic_tick(delta: float) -> void:
+    light_time = fmod(light_time + delta, 14.0)
+    for vehicle in traffic:
+        var pos: Vector2 = vehicle["pos"]
+        var dir: Vector2 = vehicle["dir"]
+        var axis := pos.x if abs(dir.x) > 0.5 else pos.y
+        var heading := dir.x if abs(dir.x) > 0.5 else dir.y
+        var red := light_time >= 7.0 if abs(dir.x) > 0.5 else light_time < 7.0
+        var stop := false
+        if red:
+            for n in range(-3, 4):
+                var dist := (float(n) * BLOCK - axis) * heading
+                if dist >= 76.0 and dist < 79.0 + 100.0 * delta:
+                    stop = true
+        if not stop:
+            var next := pos + dir * 100.0 * delta
+            if next.distance_to(car) > 53.0:
+                pos = next
+        if pos.x > 1390.0:
+            pos.x = -1390.0
+        if pos.x < -1390.0:
+            pos.x = 1390.0
+        if pos.y > 1390.0:
+            pos.y = -1390.0
+        if pos.y < -1390.0:
+            pos.y = 1390.0
+        vehicle["pos"] = pos
+
 
 func _ready() -> void:
     camera = Camera2D.new()
@@ -25,30 +110,36 @@ func _ready() -> void:
     hud.add_theme_font_size_override("font_size", 18)
     hud.text = "FIRST DRIVE 0.2  |  WASD: Move / Drive   E: Enter / Exit   Space: Brake"
     ui.add_child(hud)
+    _setup_world()
     queue_redraw()
 
 func _process(delta: float) -> void:
+    _traffic_tick(delta)
     var move := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
     if driving:
-        speed = move_toward(speed, -move.y * 390.0, 340.0 * delta)
+        speed = move_toward(speed, -move.y * 380.0, 350.0 * delta)
         if Input.is_key_pressed(KEY_SPACE):
-            speed = move_toward(speed, 0.0, 1000.0 * delta)
+            speed = move_toward(speed, 0.0, 900.0 * delta)
         if abs(speed) > 5.0:
-            angle += move.x * 2.25 * delta * sign(speed)
-        car += Vector2.UP.rotated(angle) * speed * delta
+            angle += move.x * 2.3 * delta * sign(speed)
+        var motion := Vector2.UP.rotated(angle) * speed * delta
+        var next := _move_safely(car, motion, 22.0)
+        if next.distance_to(car + motion) > 2.0:
+            speed = 0.0
+        car = next
         player = car
     else:
-        player += move * 230.0 * delta
+        player = _move_safely(player, move * 230.0 * delta, 11.0)
     if Input.is_key_pressed(KEY_E) and not _e_held:
         if driving:
-            driving = false
-            player = car + Vector2(62, 0)
-            speed = 0.0
-        elif player.distance_to(car) < 100.0:
+            var exit_pos := car + Vector2.RIGHT.rotated(angle) * 58.0
+            if not _blocked(exit_pos, 11.0):
+                driving = false
+                player = exit_pos
+                speed = 0.0
+        elif player.distance_to(car) < 85.0:
             driving = true
     _e_held = Input.is_key_pressed(KEY_E)
-    player = player.clamp(Vector2(-WORLD / 2, -WORLD / 2), Vector2(WORLD / 2, WORLD / 2))
-    car = car.clamp(Vector2(-WORLD / 2, -WORLD / 2), Vector2(WORLD / 2, WORLD / 2))
     camera.position = player
     queue_redraw()
 
@@ -146,6 +237,18 @@ func _draw() -> void:
                 _park(origin)
             else:
                 _downtown(origin, x, y)
+    for x in range(-3, 4):
+        for y in range(-3, 4):
+            var p := Vector2(float(x) * BLOCK - 63, float(y) * BLOCK - 63)
+            draw_rect(Rect2(p, Vector2(16, 16)), Color("202a30"))
+            draw_circle(p + Vector2(8, 8), 5, Color("e24b42") if light_time >= 7.0 else Color("4dc76e"))
+    for vehicle in traffic:
+        var p: Vector2 = vehicle["pos"]
+        var dir: Vector2 = vehicle["dir"]
+        draw_set_transform(p, dir.angle() + PI / 2.0)
+        draw_rect(Rect2(-19, -32, 38, 64), Color("b96455"))
+        draw_rect(Rect2(-15, -16, 30, 20), Color("354e64"))
+    draw_set_transform(Vector2.ZERO, 0.0)
     draw_set_transform(car, angle)
     draw_rect(Rect2(-21, -40, 42, 80), Color("e8b746"))
     draw_rect(Rect2(-17, -22, 34, 23), Color("2c4b5d"))
