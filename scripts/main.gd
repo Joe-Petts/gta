@@ -30,6 +30,7 @@ var last_hit := -10.0
 var game_time := 0.0
 var wanted := 0
 var police: Array[Dictionary] = []
+var wanted_star: Label
 var car_invulnerability := 0.0
 var crash_audio: AudioStreamPlayer
 var crash_cooldown := 0.0
@@ -124,6 +125,36 @@ func _clear_vehicle(p: Vector2, rot: float, kind: int, skip: int = -1, include_p
             return false
     return true
 
+func _nearest_road(value: float) -> float:
+    return clampf(roundf(value / BLOCK) * BLOCK, -2.0 * BLOCK, 2.0 * BLOCK)
+
+func _police_road_spawn(target: Vector2) -> Vector2:
+    var center := Vector2(_nearest_road(target.x), _nearest_road(target.y))
+    var choices := [
+        center + Vector2(-BLOCK, 30.0),
+        center + Vector2(BLOCK, -30.0),
+        center + Vector2(30.0, -BLOCK),
+        center + Vector2(-30.0, BLOCK)
+    ]
+    for p in choices:
+        if p.distance_to(target) > 140.0 and _road_clear(p, 0.0):
+            return p
+    return center + Vector2(0, 30)
+
+func _on_road(p: Vector2, margin: float = 0.0) -> bool:
+    if absf(p.x) > WORLD * 0.5 - 45.0 or absf(p.y) > WORLD * 0.5 - 45.0:
+        return false
+    return absf(p.x - _nearest_road(p.x)) < ROAD * 0.5 - margin or absf(p.y - _nearest_road(p.y)) < ROAD * 0.5 - margin
+
+func _road_clear(p: Vector2, heading: float) -> bool:
+    var half: Vector2 = VEHICLE_SIZES[0] * 0.5
+    for x in [-1.0, 1.0]:
+        for y in [-1.0, 1.0]:
+            var corner := p + Vector2(x * half.x, y * half.y).rotated(heading)
+            if not _on_road(corner, 3.0) or _static_blocked(corner, 1.0):
+                return false
+    return true
+
 func _police_update(delta: float) -> void:
     if wanted == 0:
         return
@@ -131,33 +162,33 @@ func _police_update(delta: float) -> void:
         var pos: Vector2 = cop["pos"]
         var heading: float = float(cop.get("angle", 0.0))
         var velocity: float = float(cop.get("speed", 0.0))
-        var target: Vector2 = player - pos
-        var distance: float = target.length()
-        var forward := Vector2.UP.rotated(heading)
-        if distance > 1.0:
-            var desired: float = target.angle() + PI * 0.5
-            var difference: float = wrapf(desired - heading, -PI, PI)
-            # Cars rotate only while moving, rather than sliding sideways.
-            var steering: float = clampf(difference, -1.0, 1.0)
-            var turn_rate: float = 1.65 * clampf(absf(velocity) / 90.0, 0.12, 1.0)
-            heading += steering * turn_rate * delta
-            forward = Vector2.UP.rotated(heading)
-        var safe_distance: float = 86.0 if driving else 53.0
-        var desired_speed: float = 175.0 if distance > safe_distance + 90.0 else 0.0
-        if absf(wrapf(target.angle() + PI * 0.5 - heading, -PI, PI)) > 1.15:
-            desired_speed = minf(desired_speed, 55.0)
-        velocity = move_toward(velocity, desired_speed, (210.0 if desired_speed < velocity else 125.0) * delta)
-        var motion := forward * velocity * delta
-        var steps := maxi(1, int(ceil(motion.length() / 4.0)))
-        var step := motion / float(steps)
+        # Choose a street intersection close to the suspect. Police stay
+        # on the road grid instead of cutting diagonally through parking lots.
+        var junction := Vector2(_nearest_road(pos.x), _nearest_road(pos.y))
+        var suspect_junction := Vector2(_nearest_road(player.x), _nearest_road(player.y))
+        var waypoint := junction
+        if pos.distance_to(junction) > 38.0:
+            waypoint = junction
+        elif absf(suspect_junction.x - junction.x) > 20.0:
+            waypoint = junction + Vector2(signf(suspect_junction.x - junction.x) * BLOCK, 0)
+        elif absf(suspect_junction.y - junction.y) > 20.0:
+            waypoint = junction + Vector2(0, signf(suspect_junction.y - junction.y) * BLOCK)
+        else:
+            waypoint = junction
+        # Follow the chosen road segment using a gentle steering response.
+        var target: Vector2 = waypoint - pos
+        var desired: float = target.angle() + PI * 0.5 if target.length() > 3.0 else heading
+        var difference: float = wrapf(desired - heading, -PI, PI)
+        var desired_speed: float = 135.0 if target.length() > 24.0 else 0.0
+        if absf(difference) > 0.45:
+            desired_speed = minf(desired_speed, 42.0)
+        velocity = move_toward(velocity, desired_speed, (230.0 if desired_speed < velocity else 120.0) * delta)
+        heading += clampf(difference, -1.0, 1.0) * 1.85 * clampf(absf(velocity) / 80.0, 0.15, 1.0) * delta
+        var motion := Vector2.UP.rotated(heading) * velocity * delta
+        var steps := maxi(1, int(ceil(motion.length() / 3.0)))
         for i in range(steps):
-            var candidate := pos + step
-            var blocked := false
-            var half := VEHICLE_SIZES[0] * 0.5
-            for dx in [-1.0, 1.0]:
-                for dy in [-1.0, 1.0]:
-                    if _static_blocked(candidate + Vector2(dx * half.x, dy * half.y).rotated(heading), 1.0):
-                        blocked = true
+            var candidate := pos + motion / float(steps)
+            var blocked := not _road_clear(candidate, heading)
             if _overlaps(candidate, heading, 0, car, angle, vehicle_kind, 8.0):
                 blocked = true
             for vehicle in traffic:
@@ -409,6 +440,19 @@ func _ready() -> void:
     status_label.position = Vector2(18, 88)
     status_label.add_theme_font_size_override("font_size", 16)
     ui.add_child(status_label)
+    wanted_star = Label.new()
+    wanted_star.text = "★"
+    wanted_star.add_theme_font_size_override("font_size", 42)
+    wanted_star.add_theme_color_override("font_color", Color("ffd54a"))
+    wanted_star.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+    wanted_star.anchor_left = 1.0
+    wanted_star.anchor_right = 1.0
+    wanted_star.offset_left = -322.0
+    wanted_star.offset_right = -272.0
+    wanted_star.offset_top = 4.0
+    wanted_star.offset_bottom = 58.0
+    wanted_star.visible = false
+    ui.add_child(wanted_star)
     queue_redraw()
 
 func _process(delta: float) -> void:
@@ -418,6 +462,7 @@ func _process(delta: float) -> void:
     _traffic_tick(delta)
     _update_pedestrians(delta)
     _police_update(delta)
+    wanted_star.visible = wanted > 0 and int(game_time * 3.5) % 2 == 0
     var move := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
     if driving:
         speed = move_toward(speed, -move.y * 380.0, 350.0 * delta)
@@ -449,7 +494,7 @@ func _process(delta: float) -> void:
                     pedestrians.remove_at(i)
                     wanted = 1
                     if police.is_empty():
-                        police.append({"pos": player + Vector2(0, -300), "angle": PI, "speed": 0.0})
+                        police.append({"pos": _police_road_spawn(player), "angle": 0.0, "speed": 0.0})
     else:
         player = _move_safely(player, move * 230.0 * delta, 11.0)
     if Input.is_key_pressed(KEY_E) and not _e_held:
